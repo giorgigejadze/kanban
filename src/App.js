@@ -16,6 +16,7 @@ function App() {
   const hasBoardEventsListenerRef = useRef(false);
   const activeBoardIdRef = useRef(null);
   const boardRefreshTimeoutRef = useRef(null);
+  const skipBoardRefreshUntilRef = useRef(0);
 
   const normalizeMondayTheme = (themeCandidate) => {
     const value = String(themeCandidate || '').toLowerCase().trim();
@@ -125,6 +126,7 @@ function App() {
         mondayService.listenBoardChanges(() => {
           const boardId = activeBoardIdRef.current;
           if (!boardId) return;
+          if (Date.now() < skipBoardRefreshUntilRef.current) return;
           if (boardRefreshTimeoutRef.current) clearTimeout(boardRefreshTimeoutRef.current);
           boardRefreshTimeoutRef.current = setTimeout(() => {
             loadEmployeesFromBoard(boardId);
@@ -189,6 +191,22 @@ function App() {
     }
   };
 
+  const handleCardMoved = async (previousItem, _nextItem, targetColumn) => {
+    if (isDemo || !previousItem?.statusColumnId) return;
+    const targetStatus = String(targetColumn?.title || '').trim();
+    if (!targetStatus) return;
+    const prevStatus = String(previousItem?.statusText || '').trim();
+    if (prevStatus === targetStatus) return;
+    try {
+      // Drag/drop-ზე უკვე ლოკალურად განახლებულია UI; ახლავე არ გადავტვირთოთ ბორდი events listener-ით.
+      skipBoardRefreshUntilRef.current = Date.now() + 2500;
+      await mondayService.updateItemDetails(previousItem, { statusText: targetStatus });
+    } catch (e) {
+      console.error('[Kandan] drag status sync შეცდომა:', e);
+      setError(e?.message || 'სტატუსის სინქრონიზაცია ვერ მოხერხდა');
+    }
+  };
+
   useEffect(() => {
     loadData();
   }, []);
@@ -224,6 +242,7 @@ function App() {
           error={error}
           onItemClick={setSelectedItem}
           onColumnsChange={handleColumnsChange}
+          onCardMoved={handleCardMoved}
         />
       </main>
       {selectedItem && (

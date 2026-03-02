@@ -224,9 +224,10 @@ async function updateItemDetails(item, updates = {}) {
   const boardId = item?.boardId ? String(item.boardId) : null;
   if (!itemId || !boardId) throw new Error('item/board ინფორმაცია არ არის საკმარისი');
 
+  const hasTitleUpdate = Object.prototype.hasOwnProperty.call(updates, 'title');
   const nextTitle = String(updates.title ?? '').trim();
   const prevTitle = String(item.title || '').trim();
-  if (nextTitle && nextTitle !== prevTitle) {
+  if (hasTitleUpdate && nextTitle && nextTitle !== prevTitle) {
     await makeRequest(CHANGE_SIMPLE_COLUMN_VALUE_MUTATION, {
       itemId,
       boardId,
@@ -235,20 +236,30 @@ async function updateItemDetails(item, updates = {}) {
     });
   }
 
+  const hasStatusUpdate = Object.prototype.hasOwnProperty.call(updates, 'statusText');
   const nextStatus = String(updates.statusText ?? '').trim();
   const prevStatus = String(item.statusText || '').trim();
-  if (item.statusColumnId && nextStatus && nextStatus !== prevStatus) {
+  const statusOptions = Array.isArray(item.statusOptions) ? item.statusOptions : [];
+  const normalizedNext = nextStatus.toLowerCase();
+  const matchingOption = statusOptions.find((opt) => String(opt?.label || '').trim().toLowerCase() === normalizedNext);
+  // თუ "Uncategorized" Monday-ში რეალური სტატუსის ლეიბლად არ არსებობს, სტატუსს აღარ ვშლით.
+  const resolvedStatus = matchingOption ? String(matchingOption.label).trim() : (
+    normalizedNext === 'uncategorized' ? '' : nextStatus
+  );
+  const shouldUpdateStatus = hasStatusUpdate && item.statusColumnId && resolvedStatus && resolvedStatus !== prevStatus;
+  if (shouldUpdateStatus) {
     await makeRequest(CHANGE_SIMPLE_COLUMN_VALUE_MUTATION, {
       itemId,
       boardId,
       columnId: String(item.statusColumnId),
-      value: nextStatus
+      value: resolvedStatus
     });
   }
 
+  const hasDateUpdate = Object.prototype.hasOwnProperty.call(updates, 'dateText');
   const nextDate = toMondayDateString(updates.dateText);
   const prevDate = toMondayDateString(item.dateText);
-  if (item.dateColumnId && nextDate !== prevDate) {
+  if (hasDateUpdate && item.dateColumnId && nextDate !== prevDate) {
     await makeRequest(CHANGE_SIMPLE_COLUMN_VALUE_MUTATION, {
       itemId,
       boardId,
@@ -257,9 +268,10 @@ async function updateItemDetails(item, updates = {}) {
     });
   }
 
+  const hasPersonUpdate = Object.prototype.hasOwnProperty.call(updates, 'personId');
   const prevPersonId = item.assignee?.id ? String(item.assignee.id) : '';
   const nextPersonId = updates.personId ? String(updates.personId) : '';
-  if (item.personColumnId && nextPersonId !== prevPersonId) {
+  if (hasPersonUpdate && item.personColumnId && nextPersonId !== prevPersonId) {
     const personId = nextPersonId ? Number(nextPersonId) : null;
     const value = personId
       ? JSON.stringify({ personsAndTeams: [{ id: personId, kind: 'person' }] })
@@ -272,12 +284,31 @@ async function updateItemDetails(item, updates = {}) {
     });
   }
 
-  if (typeof updates.groupId === 'string' && updates.groupId && updates.groupId !== String(item.groupId || '')) {
+  const hasGroupUpdate = Object.prototype.hasOwnProperty.call(updates, 'groupId');
+  if (hasGroupUpdate && typeof updates.groupId === 'string' && updates.groupId && updates.groupId !== String(item.groupId || '')) {
     await makeRequest(MOVE_ITEM_TO_BOARD_MUTATION, {
       itemId,
       boardId,
       groupId: updates.groupId
     });
+  }
+
+  const hasExtraFieldsUpdate = Object.prototype.hasOwnProperty.call(updates, 'extraFields');
+  if (hasExtraFieldsUpdate && updates.extraFields && typeof updates.extraFields === 'object') {
+    const extraFields = Array.isArray(item.extraFields) ? item.extraFields : [];
+    for (const field of extraFields) {
+      const columnId = String(field?.id || '');
+      if (!columnId) continue;
+      const prevValue = String(field?.value || '');
+      const nextValue = String(updates.extraFields[columnId] ?? '');
+      if (nextValue === prevValue) continue;
+      await makeRequest(CHANGE_SIMPLE_COLUMN_VALUE_MUTATION, {
+        itemId,
+        boardId,
+        columnId,
+        value: nextValue
+      });
+    }
   }
 }
 
@@ -472,6 +503,24 @@ function getConnectBoardFromItem(item) {
   return (any && any.text.trim()) ? any.text.trim() : '';
 }
 
+function buildItemExtraFields(item, columnsById = {}) {
+  return (item.column_values || [])
+    .map((cv) => {
+      const id = String(cv?.id || '');
+      const type = String(cv?.type || '').toLowerCase();
+      const title = columnsById[id]?.title || id || 'Field';
+      const value = String(cv?.text || '').trim();
+      return { id, type, title, value };
+    })
+    .filter((field) => {
+      if (!field.value) return false;
+      if (field.type === 'status' || field.type === 'person' || field.type === 'date') return false;
+      const lowId = field.id.toLowerCase();
+      if (lowId === 'status' || lowId === 'person' || lowId === 'date') return false;
+      return true;
+    });
+}
+
 function getColumnValueByType(item, typeName) {
   const type = String(typeName || '').toLowerCase();
   return (item.column_values || []).find(
@@ -491,15 +540,38 @@ function getPersonColumnId(item) {
   return getColumnValueByType(item, 'person')?.id || null;
 }
 
+const MONDAY_COLOR_TO_HEX = {
+  green: '#27ae60',
+  red: '#e74c3c',
+  orange: '#e67e22',
+  yellow: '#f1c40f',
+  blue: '#3498db',
+  purple: '#9b59b6',
+  pink: '#ff7ab8',
+  gray: '#95a5a6',
+  grey: '#95a5a6',
+  black: '#2c3e50',
+  brown: '#8e6e53'
+};
+
+function toHexColor(colorValue) {
+  const value = String(colorValue || '').trim().toLowerCase();
+  if (!value) return null;
+  if (value.startsWith('#')) return value;
+  return MONDAY_COLOR_TO_HEX[value] || null;
+}
+
 function extractStatusOptionsFromSettings(settingsStr) {
   if (!settingsStr) return [];
   try {
     const parsed = JSON.parse(settingsStr);
     const labels = parsed?.labels || {};
+    const labelsColors = parsed?.labels_colors || {};
     return Object.keys(labels)
       .map((indexKey) => ({
         index: Number(indexKey),
-        label: String(labels[indexKey] || '').trim()
+        label: String(labels[indexKey] || '').trim(),
+        color: toHexColor(labelsColors[indexKey]?.color)
       }))
       .filter((x) => x.label)
       .sort((a, b) => a.index - b.index);
@@ -516,6 +588,13 @@ function buildStatusOptionsByColumnId(board) {
     if (options.length) out[String(col.id)] = options;
   });
   return out;
+}
+
+function getStatusColorByText(statusText, statusOptions) {
+  const text = String(statusText || '').trim().toLowerCase();
+  if (!text || !Array.isArray(statusOptions)) return null;
+  const match = statusOptions.find((opt) => String(opt?.label || '').trim().toLowerCase() === text);
+  return match?.color || null;
 }
 
 /** Status-ების სასურველი რიგი Kanban სვეტებისთვის (შედარება case-insensitive) */
@@ -546,6 +625,7 @@ function transformToKanban(boardData) {
     }
     const column = columnsMap.get(groupTitle);
     const statusColumnId = getStatusColumnId(item);
+    const statusOptions = (boardData.__statusOptionsByColumnId || {})[String(statusColumnId || '')] || [];
     const dateColumnId = getDateColumnId(item);
     const personColumnId = getPersonColumnId(item);
     column.items.push({
@@ -561,10 +641,12 @@ function transformToKanban(boardData) {
       statusColumnId,
       dateColumnId,
       personColumnId,
-      statusOptions: (boardData.__statusOptionsByColumnId || {})[String(statusColumnId || '')] || [],
+      statusOptions,
       statusText: getStatusFromItem(item),
+      statusColor: getStatusColorByText(getStatusFromItem(item), statusOptions),
       dateText: getDateFromItem(item),
       connectBoard: getConnectBoardFromItem(item),
+      extraFields: buildItemExtraFields(item, columnsById),
       content: (item.column_values || [])
         .filter((cv) => {
           if (!cv.text || !cv.text.trim()) return false;
@@ -616,6 +698,7 @@ function transformToKanbanByStatus(boardData) {
     }
     const column = columnsMap.get(statusTitle);
     const statusColumnId = getStatusColumnId(item);
+    const statusOptions = (boardData.__statusOptionsByColumnId || {})[String(statusColumnId || '')] || [];
     const dateColumnId = getDateColumnId(item);
     const personColumnId = getPersonColumnId(item);
     column.items.push({
@@ -631,10 +714,12 @@ function transformToKanbanByStatus(boardData) {
       statusColumnId,
       dateColumnId,
       personColumnId,
-      statusOptions: (boardData.__statusOptionsByColumnId || {})[String(statusColumnId || '')] || [],
+      statusOptions,
       statusText: getStatusFromItem(item),
+      statusColor: getStatusColorByText(getStatusFromItem(item), statusOptions),
       dateText: getDateFromItem(item),
       connectBoard: getConnectBoardFromItem(item),
+      extraFields: buildItemExtraFields(item, columnsById),
       content: (item.column_values || [])
         .filter((cv) => {
           if (!cv.text || !cv.text.trim()) return false;
@@ -653,9 +738,30 @@ function transformToKanbanByStatus(boardData) {
         .join(' • ') || ''
     });
   });
+  // Monday status სვეტის ყველა ლეიბლი (settings_str-იდან) ვამატებთ, თუნდაც ცარიელი იყოს.
+  Object.values(boardData.__statusOptionsByColumnId || {}).forEach((options) => {
+    (options || []).forEach((opt) => {
+      const statusTitle = String(opt?.label || '').trim();
+      if (!statusTitle) return;
+      if (!columnsMap.has(statusTitle)) {
+        columnsMap.set(statusTitle, {
+          id: statusTitle.replace(/\s+/g, '-').toLowerCase(),
+          title: statusTitle,
+          headerColor: opt?.color || null,
+          items: []
+        });
+      }
+    });
+  });
   const columns = Array.from(columnsMap.values()).sort(
     (a, b) => orderIndex(a.title) - orderIndex(b.title) || a.title.localeCompare(b.title)
   );
+  columns.forEach((column) => {
+    if (!column.headerColor) {
+      const firstItemColor = (column.items || []).find((it) => it?.statusColor)?.statusColor || null;
+      if (firstItemColor) column.headerColor = firstItemColor;
+    }
+  });
   return { columns };
 }
 

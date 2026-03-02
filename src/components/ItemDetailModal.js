@@ -31,19 +31,21 @@ const ItemDetailModal = ({ item, saving, onSave, onClose }) => {
   const currentItem = item || {};
 
   const [title, setTitle] = useState(currentItem.title || '');
-  const [groupId, setGroupId] = useState(currentItem.groupId || '');
   const [personId, setPersonId] = useState(currentItem.assignee?.id || '');
   const [statusText, setStatusText] = useState(currentItem.statusText || '');
   const [dateText, setDateText] = useState(toDateInputValue(currentItem.dateText));
+  const [extraFieldValues, setExtraFieldValues] = useState(() =>
+    Object.fromEntries((currentItem.extraFields || []).map((field) => [field.id, field.value || '']))
+  );
   const [submitError, setSubmitError] = useState('');
 
   useEffect(() => {
     if (!item) return;
     setTitle(item.title || '');
-    setGroupId(item.groupId || '');
     setPersonId(item.assignee?.id || '');
     setStatusText(item.statusText || '');
     setDateText(toDateInputValue(item.dateText));
+    setExtraFieldValues(Object.fromEntries((item.extraFields || []).map((field) => [field.id, field.value || ''])));
     setSubmitError('');
   }, [item]);
 
@@ -63,10 +65,10 @@ const ItemDetailModal = ({ item, saving, onSave, onClose }) => {
     try {
       await onSave?.(item, {
         title,
-        groupId,
         personId,
         statusText,
-        dateText
+        dateText,
+        extraFields: extraFieldValues
       });
       onClose?.();
     } catch (e) {
@@ -93,19 +95,6 @@ const ItemDetailModal = ({ item, saving, onSave, onClose }) => {
         </div>
         <div className="item-detail-body">
           <div className="item-detail-row">
-            <span className="item-detail-label item-detail-label-group">
-              <span className="item-detail-label-icon" aria-hidden>●</span>
-              Group
-            </span>
-            <span className="item-detail-value">
-              <select className="item-detail-input" value={groupId} onChange={(e) => setGroupId(e.target.value)}>
-                {(item.groups || []).map((group) => (
-                  <option key={group.id} value={group.id}>{group.title}</option>
-                ))}
-              </select>
-            </span>
-          </div>
-          <div className="item-detail-row">
             <span className="item-detail-label item-detail-label-person">
               <span className="item-detail-label-icon" aria-hidden>👤</span>
               Person
@@ -130,7 +119,12 @@ const ItemDetailModal = ({ item, saving, onSave, onClose }) => {
                   <option key={status} value={status}>{status}</option>
                 ))}
               </select>
-              <span className={`item-detail-status-badge ${statusClass}`}>{statusText || 'Status'}</span>
+              <span
+                className={`item-detail-status-badge ${statusClass}`}
+                style={item.statusColor ? { background: item.statusColor } : undefined}
+              >
+                {statusText || 'Status'}
+              </span>
             </span>
           </div>
           <div className="item-detail-row">
@@ -147,6 +141,21 @@ const ItemDetailModal = ({ item, saving, onSave, onClose }) => {
               />
             </span>
           </div>
+          {(item.extraFields || []).map((field) => (
+            <div className="item-detail-row" key={field.id}>
+              <span className="item-detail-label">
+                <span className="item-detail-label-icon" aria-hidden>•</span>
+                {field.title}
+              </span>
+              <span className="item-detail-value">
+                <input
+                  className="item-detail-input"
+                  value={extraFieldValues[field.id] ?? ''}
+                  onChange={(e) => setExtraFieldValues((prev) => ({ ...prev, [field.id]: e.target.value }))}
+                />
+              </span>
+            </div>
+          ))}
           {submitError ? <p className="item-detail-error">{submitError}</p> : null}
           <div className="item-detail-footer">
             <button type="button" className="item-detail-btn item-detail-btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>

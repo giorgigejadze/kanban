@@ -19,7 +19,7 @@ const cloneColumns = (sourceColumns) =>
     items: [...(column.items || [])]
   }));
 
-const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange }) => {
+const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange, onCardMoved }) => {
   const [dragging, setDragging] = useState(null);
   const [dropTarget, setDropTarget] = useState(null);
 
@@ -35,6 +35,7 @@ const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange }) 
 
     const [movedItem] = sourceColumn.items.splice(sourceItemIndex, 1);
     if (!movedItem) return;
+    const previousItem = { ...movedItem };
 
     // როცა ბარათი სხვა სტატუს-სვეტში გადადის, card-ის Status ველი ახალ სვეტთან სინქრონდება.
     if (String(sourceColumn.id) !== String(targetColumn.id)) {
@@ -53,6 +54,9 @@ const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange }) 
 
     if (typeof onColumnsChange === 'function') {
       onColumnsChange(nextColumns);
+    }
+    if (String(sourceColumn.id) !== String(targetColumn.id) && typeof onCardMoved === 'function') {
+      onCardMoved(previousItem, { ...movedItem }, { id: targetColumn.id, title: targetColumn.title });
     }
   };
 
@@ -80,6 +84,10 @@ const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange }) 
   };
 
   if (loading) {
+    // პირველ ჩატვირთვაზე ცარიელი სივრცე ვაჩვენოთ, spinner/ტექსტის გარეშე.
+    if (!columns || columns.length === 0) {
+      return <div className="kanban-board" aria-hidden />;
+    }
     return (
       <div className="kanban-loading">
         <div className="spinner"></div>

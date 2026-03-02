@@ -111,7 +111,7 @@
 
 .kanban-card-dragging {
   opacity: 0.45;
-  transform: rotate(1deg);
+  transform: rotate(0deg);
 }
 
 .kanban-drop-target {
