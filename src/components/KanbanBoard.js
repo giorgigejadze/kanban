@@ -19,9 +19,10 @@ const cloneColumns = (sourceColumns) =>
     items: [...(column.items || [])]
   }));
 
-const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange, onCardMoved }) => {
+const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange, onCardMoved, onAddItem, onDeleteItem }) => {
   const [dragging, setDragging] = useState(null);
   const [dropTarget, setDropTarget] = useState(null);
+  const [openMenuColumnId, setOpenMenuColumnId] = useState(null);
 
   const moveCard = (sourceColumnId, itemId, targetColumnId, targetIndex) => {
     if (!sourceColumnId || !itemId || !targetColumnId || typeof targetIndex !== 'number') return;
@@ -91,7 +92,7 @@ const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange, on
     return (
       <div className="kanban-loading">
         <div className="spinner"></div>
-        <p>მონაცემების ჩატვირთვა...</p>
+        <p>Loading...</p>
       </div>
     );
   }
@@ -99,10 +100,10 @@ const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange, on
   if (error) {
     return (
       <div className="kanban-error">
-        <h3>შეცდომა</h3>
+        <h3>Error</h3>
         <p>{error}</p>
         <p className="error-hint">
-          გთხოვთ შეამოწმოთ API Key და კავშირი Monday.com-თან, ან გამოიყენეთ Demo რეჟიმი
+          Please check your API key and connection to Monday.com or use the Demo mode
         </p>
       </div>
     );
@@ -111,7 +112,7 @@ const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange, on
   if (!columns || columns.length === 0) {
     return (
       <div className="kanban-empty">
-        <p>მონაცემები არ მოიძებნა</p>
+        <p>No data found</p>
       </div>
     );
   }
@@ -124,10 +125,41 @@ const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange, on
             className={`kanban-column-header ${column.headerColor ? '' : getColumnHeaderClass(column.title)}`}
             style={column.headerColor ? { background: column.headerColor } : undefined}
           >
-            <h3>{column.title}</h3>
-            <div className="column-header-right">
+            <div className="column-header-left">
+              <h3>{column.title}</h3>
               <span className="item-count">{column.items.length}</span>
-              <button type="button" className="column-menu-btn" aria-label="მეტი">⋯</button>
+            </div>
+            <div className="column-header-right">
+              <div className="column-menu-wrap">
+                <button
+                  type="button"
+                  className="column-menu-btn"
+                  aria-label="მენიუ"
+                  aria-expanded={openMenuColumnId === column.id}
+                  onClick={() => setOpenMenuColumnId((prev) => (prev === column.id ? null : column.id))}
+                >
+                  ⋯
+                </button>
+                {openMenuColumnId === column.id && (
+                  <>
+                    <div className="column-menu-backdrop" onClick={() => setOpenMenuColumnId(null)} aria-hidden />
+                    <div className="column-menu-dropdown">
+                      {onAddItem && (
+                        <button
+                          type="button"
+                          className="column-menu-item"
+                          onClick={() => {
+                            onAddItem(column);
+                            setOpenMenuColumnId(null);
+                          }}
+                        >
+                          + Add Item
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           </div>
           <div
@@ -162,32 +194,43 @@ const KanbanBoard = ({ columns, loading, error, onItemClick, onColumnsChange, on
                   onCardDrop(e, column.id, itemIndex);
                 }}
               >
+                <button
+                  type="button"
+                  className="kanban-card-delete"
+                  aria-label="წაშლა"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDeleteItem?.(item);
+                  }}
+                >
+                  🗑
+                </button>
                 <div className="card-header">
                   <h4>{item.title}</h4>
                   <div className="card-meta">
                     <span className="card-subtitle">{item.boardName || 'Board view'}</span>
                     <span className="card-icons">
                       {item.assignee ? (
-                        <span className="card-avatar" title={item.assignee.name}>
+                        <span className="card-avatar" title={item.assignee.email || item.assignee.name}>
                           {item.assignee.avatarUrl ? (
-                            <img src={item.assignee.avatarUrl} alt={item.assignee.name} />
+                            <img src={item.assignee.avatarUrl} alt={item.assignee.email || item.assignee.name} />
                           ) : (
                             <span className="card-avatar-initial">
-                              {item.assignee.name?.[0]?.toUpperCase() || '👤'}
+                              {(item.assignee.email || item.assignee.name)?.[0]?.toUpperCase() || '👤'}
                             </span>
                           )}
                         </span>
                       ) : (
-                        <span className="card-icon card-icon-person" aria-hidden>👤</span>
+                        <span className="card-avatar card-avatar-unassigned" title="Unassigned" aria-hidden>
+                          <span className="card-avatar-initial">?</span>
+                        </span>
                       )}
                     </span>
                   </div>
                 </div>
-                {item.content && (
-                  <div className="card-content">
-                    <p>{item.content}</p>
-                  </div>
-                )}
+                <div className="card-content">
+                  <p>{item.content || ''}</p>
+                </div>
               </div>
             ))}
           </div>

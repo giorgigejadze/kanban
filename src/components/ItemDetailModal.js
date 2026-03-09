@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import mondayService from '../services/mondayService';
 import './ItemDetailModal.css';
 
 const STATUS_BADGE_CLASS = {
@@ -31,22 +32,34 @@ const ItemDetailModal = ({ item, saving, onSave, onClose }) => {
   const currentItem = item || {};
 
   const [title, setTitle] = useState(currentItem.title || '');
-  const [personId, setPersonId] = useState(currentItem.assignee?.id || '');
+  const [personId, setPersonId] = useState(currentItem.assignee?.id != null ? String(currentItem.assignee.id) : '');
   const [statusText, setStatusText] = useState(currentItem.statusText || '');
   const [dateText, setDateText] = useState(toDateInputValue(currentItem.dateText));
   const [extraFieldValues, setExtraFieldValues] = useState(() =>
     Object.fromEntries((currentItem.extraFields || []).map((field) => [field.id, field.value || '']))
   );
   const [submitError, setSubmitError] = useState('');
+  const [fetchedPeopleOptions, setFetchedPeopleOptions] = useState([]);
 
   useEffect(() => {
     if (!item) return;
     setTitle(item.title || '');
-    setPersonId(item.assignee?.id || '');
+    setPersonId(item.assignee?.id != null ? String(item.assignee.id) : '');
     setStatusText(item.statusText || '');
     setDateText(toDateInputValue(item.dateText));
     setExtraFieldValues(Object.fromEntries((item.extraFields || []).map((field) => [field.id, field.value || ''])));
     setSubmitError('');
+  }, [item]);
+
+  useEffect(() => {
+    if (!item || !mondayService.hasApi()) return;
+    let cancelled = false;
+    mondayService.fetchAccountUsers().then((users) => {
+      if (!cancelled && Array.isArray(users) && users.length) {
+        setFetchedPeopleOptions(users);
+      }
+    });
+    return () => { cancelled = true; };
   }, [item]);
 
   const statusOptions = useMemo(() => {
@@ -55,6 +68,23 @@ const ItemDetailModal = ({ item, saving, onSave, onClose }) => {
     }
     return [currentItem.statusText || 'Done'];
   }, [currentItem.statusOptions, currentItem.statusText]);
+
+  const peopleOptionsWithAssignee = useMemo(() => {
+    const boardOpts = currentItem.peopleOptions || [];
+    const fetched = fetchedPeopleOptions || [];
+    const byId = new Map();
+    const add = (p) => {
+      if (!p?.id) return;
+      const id = String(p.id);
+      if (!byId.has(id)) byId.set(id, { id, name: p.name || '', email: p.email || '' });
+    };
+    fetched.forEach(add);
+    boardOpts.forEach(add);
+    const assignee = currentItem.assignee;
+    if (assignee?.id) add(assignee);
+    const opts = Array.from(byId.values()).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    return opts.length ? opts : boardOpts;
+  }, [currentItem.peopleOptions, currentItem.assignee, fetchedPeopleOptions]);
 
   const statusClass = getStatusBadgeClass(statusText);
 
@@ -72,7 +102,7 @@ const ItemDetailModal = ({ item, saving, onSave, onClose }) => {
       });
       onClose?.();
     } catch (e) {
-      setSubmitError(e?.message || 'შენახვა ვერ მოხერხდა');
+      setSubmitError(e?.message || 'Failed to Save');
     }
   };
 
@@ -100,10 +130,12 @@ const ItemDetailModal = ({ item, saving, onSave, onClose }) => {
               Person
             </span>
             <span className="item-detail-value item-detail-value-person">
-              <select className="item-detail-input" value={personId || ''} onChange={(e) => setPersonId(e.target.value)}>
+              <select className="item-detail-input" value={String(personId || '')} onChange={(e) => setPersonId(e.target.value || '')}>
                 <option value="">Unassigned</option>
-                {(item.peopleOptions || []).map((person) => (
-                  <option key={person.id} value={person.id}>{person.name}</option>
+                {peopleOptionsWithAssignee.map((person) => (
+                  <option key={String(person.id)} value={String(person.id)}>
+                    {person.name || person.email || `User ${person.id}`}
+                  </option>
                 ))}
               </select>
             </span>

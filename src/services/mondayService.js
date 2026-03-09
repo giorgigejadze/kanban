@@ -6,10 +6,25 @@ const API_KEY = process.env.REACT_APP_MONDAY_API_KEY || '';
 const API_PROXY_URL = (process.env.REACT_APP_API_URL || '').replace(/\/$/, '');
 
 const GET_BOARDS_QUERY = `
-  query {
-    boards(limit: 10) {
+  query GetBoards($limit: Int) {
+    boards(limit: $limit) {
       id
       name
+    }
+  }
+`;
+
+const GET_WORKSPACE_USERS_QUERY = `
+  query GetWorkspaceUsers($workspaceIds: [Int]) {
+    workspaces(ids: $workspaceIds) {
+      id
+      users_subscribers {
+        id
+        name
+        email
+        photo_thumb_small
+        photo_original
+      }
     }
   }
 `;
@@ -19,6 +34,7 @@ const GET_BOARD_ITEMS_QUERY = `
     boards(ids: $boardId) {
       id
       name
+      workspace_id
       columns {
         id
         title
@@ -26,7 +42,14 @@ const GET_BOARD_ITEMS_QUERY = `
         settings_str
       }
       groups { id title }
-      items_page(limit: 100) {
+      subscribers {
+        id
+        name
+        email
+        photo_thumb_small
+        photo_original
+      }
+      items_page(limit: 500) {
         items {
           id
           name
@@ -34,6 +57,46 @@ const GET_BOARD_ITEMS_QUERY = `
           column_values { id text type value }
         }
       }
+    }
+  }
+`;
+
+/** ბორდი + ყველა account მომხმარებელი ერთ მოთხოვნაში – Person dropdown-ისთვის */
+const GET_BOARD_WITH_USERS_QUERY = `
+  query GetBoardWithUsers($boardId: [ID!]) {
+    boards(ids: $boardId) {
+      id
+      name
+      workspace_id
+      columns {
+        id
+        title
+        type
+        settings_str
+      }
+      groups { id title }
+      subscribers {
+        id
+        name
+        email
+        photo_thumb_small
+        photo_original
+      }
+      items_page(limit: 500) {
+        items {
+          id
+          name
+          group { id title }
+          column_values { id text type value }
+        }
+      }
+    }
+    account_users: users {
+      id
+      name
+      email
+      photo_thumb_small
+      photo_original
     }
   }
 `;
@@ -48,6 +111,10 @@ const GET_USERS_QUERY = `
       photo_thumb_small
     }
   }
+`;
+
+const GET_ALL_USERS_QUERY = `
+  query { users { id name email photo_thumb_small photo_original } }
 `;
 
 const CHANGE_SIMPLE_COLUMN_VALUE_MUTATION = `
@@ -69,6 +136,22 @@ const CHANGE_COLUMN_VALUE_MUTATION = `
 const MOVE_ITEM_TO_BOARD_MUTATION = `
   mutation MoveItemToBoard($itemId: ID!, $boardId: ID!, $groupId: String!) {
     move_item_to_board(item_id: $itemId, board_id: $boardId, group_id: $groupId) {
+      id
+    }
+  }
+`;
+
+const CREATE_ITEM_MUTATION = `
+  mutation CreateItem($boardId: ID!, $groupId: String!, $itemName: String!) {
+    create_item(board_id: $boardId, group_id: $groupId, item_name: $itemName) {
+      id
+    }
+  }
+`;
+
+const DELETE_ITEM_MUTATION = `
+  mutation DeleteItem($itemId: ID!) {
+    delete_item(item_id: $itemId) {
       id
     }
   }
@@ -99,6 +182,53 @@ function waitForMondayApi(_maxWaitMs = 5000) {
 
 function hasApi() {
   return getMondayApi() || (API_KEY && API_KEY.trim()) || (API_PROXY_URL && API_PROXY_URL.trim());
+}
+
+const STORAGE_KEY_BOARDS = 'kandan-selected-board-ids';
+
+/** არჩეული ბორდების ID-ების შენახვა – Monday iframe-ში monday.storage, სხვაგან localStorage */
+async function getBoardIdsFromStorage() {
+  try {
+    const monday = getMondayApi();
+    if (monday?.storage?.getItem) {
+      const res = await monday.storage.getItem(STORAGE_KEY_BOARDS);
+      const raw = res?.data?.value ?? res?.value ?? res?.data;
+      const str = typeof raw === 'string' ? raw : (raw != null ? JSON.stringify(raw) : null);
+      if (str) {
+        const parsed = JSON.parse(str);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map(String).filter(Boolean);
+        }
+      }
+    }
+  } catch (e) {}
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY_BOARDS) : null;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map(String).filter(Boolean);
+      }
+    }
+  } catch (e) {}
+  return [];
+}
+
+/** არჩეული ბორდების ID-ების ჩაწერა */
+async function setBoardIdsToStorage(ids) {
+  const value = JSON.stringify(ids || []);
+  try {
+    const monday = getMondayApi();
+    if (monday?.storage?.setItem) {
+      await monday.storage.setItem(STORAGE_KEY_BOARDS, value);
+      return;
+    }
+  } catch (e) {}
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEY_BOARDS, value);
+    }
+  } catch (e) {}
 }
 
 /** Monday-ში ღია ბორდის ID (monday.get('context')), თუ არ ვართ ბორდის კონტექსტში – null */
@@ -312,51 +442,155 @@ async function updateItemDetails(item, updates = {}) {
   }
 }
 
-async function fetchBoards() {
-  const data = await makeRequest(GET_BOARDS_QUERY);
+/**
+ * ახალი აითემის შექმნა ბორდზე მოცემულ status-ზე.
+ * @param {Object} params
+ * @param {string} params.boardId
+ * @param {string} params.groupId
+ * @param {string} params.statusColumnId
+ * @param {string} params.statusLabel – სტატუსის ლეიბლი
+ * @param {string} [params.itemName='ახალი კლიენტი']
+ */
+async function createItem({ boardId, groupId, statusColumnId, statusLabel, itemName = 'ახალი კლიენტი' }) {
+  const bid = boardId ? String(boardId).trim() : '';
+  const gid = String(groupId || '').trim();
+  if (!bid || !gid) throw new Error('boardId და groupId სავალდებულოა');
+  const name = String(itemName || 'ახალი კლიენტი').trim() || 'ახალი კლიენტი';
+  const createData = await makeRequest(CREATE_ITEM_MUTATION, { boardId: bid, groupId: gid, itemName: name });
+  const id = createData?.create_item?.id;
+  if (!id) throw new Error('create_item არ დააბრუნა id');
+  if (statusColumnId && statusLabel) {
+    try {
+      await makeRequest(CHANGE_SIMPLE_COLUMN_VALUE_MUTATION, {
+        itemId: id,
+        boardId: bid,
+        columnId: String(statusColumnId),
+        value: String(statusLabel)
+      });
+    } catch (e) {
+      console.warn('[Monday API] create_item წარმატებული, status update ვერ მოხერხდა:', e?.message);
+    }
+  }
+  return { id };
+}
+
+async function deleteItem(itemId) {
+  const id = itemId ? String(itemId) : null;
+  if (!id) throw new Error('itemId სავალდებულოა');
+  await makeRequest(DELETE_ITEM_MUTATION, { itemId: id });
+  return { id };
+}
+
+async function fetchBoards(limit = 50) {
+  const data = await makeRequest(GET_BOARDS_QUERY, { limit });
   const boards = (data && data.boards) || (data && Array.isArray(data) ? data : null);
   console.log('[Monday API] ბორდების მონაცემები:', boards || data);
   if (!boards || !boards.length) throw new Error('ბორდები არ მოიძებნა');
   return boards;
 }
 
+/** Person/People სვეტის settings_str-იდან suggested ან allowed user IDs */
+function extractSuggestedPersonIdsFromColumns(columns = []) {
+  const ids = new Set();
+  (columns || []).forEach((col) => {
+    if (!col || (col.type || '').toLowerCase() !== 'people' && (col.type || '').toLowerCase() !== 'person') return;
+    const str = col.settings_str;
+    if (!str || typeof str !== 'string') return;
+    try {
+      const parsed = JSON.parse(str);
+      const arr =
+        parsed?.person_ids ||
+        parsed?.suggested_user_ids ||
+        parsed?.allowed_user_ids ||
+        parsed?.user_ids ||
+        (Array.isArray(parsed?.persons) ? parsed.persons.map((p) => p?.id ?? p).filter(Boolean) : []);
+      (arr || []).forEach((id) => {
+        const n = typeof id === 'number' ? id : parseInt(id, 10);
+        if (!Number.isNaN(n)) ids.add(n);
+      });
+    } catch (e) {
+      /* ignore */
+    }
+  });
+  return Array.from(ids);
+}
+
 async function fetchBoardItems(boardId) {
-  const data = await makeRequest(GET_BOARD_ITEMS_QUERY, { boardId: [boardId] });
+  let data;
+  try {
+    data = await makeRequest(GET_BOARD_WITH_USERS_QUERY, { boardId: [boardId] });
+  } catch (e) {
+    data = await makeRequest(GET_BOARD_ITEMS_QUERY, { boardId: [boardId] });
+  }
   const boards = (data && data.boards) || (Array.isArray(data) ? data : null);
   if (!boards || !boards.length) throw new Error('ბორდი არ მოიძებნა');
   const board = boards[0];
+  const accountUsers = data?.account_users || [];
   // Column ID -> title/type map, რომ შევძლოთ მხოლოდ "Data" სვეტის გამოყვანა
   if (Array.isArray(board.columns)) {
     const columnsById = {};
+    let personColumnId = null;
     board.columns.forEach((col) => {
       if (!col || !col.id) return;
-      columnsById[String(col.id)] = {
-        id: String(col.id),
-        title: col.title || '',
-        type: col.type || ''
-      };
+      const cid = String(col.id);
+      const ctype = (col.type || '').toLowerCase();
+      columnsById[cid] = { id: cid, title: col.title || '', type: col.type || '' };
+      if (!personColumnId && (ctype === 'people' || ctype === 'person')) {
+        personColumnId = cid;
+      }
     });
     board.__columnsById = columnsById;
     board.__statusOptionsByColumnId = buildStatusOptionsByColumnId(board);
+    board.__personColumnId = personColumnId;
   }
   board.__groups = Array.isArray(board.groups) ? board.groups.map((g) => ({ id: String(g.id), title: g.title || '' })) : [];
   board.__usersById = board.__usersById || {};
   if (!board.items_page && Array.isArray(board.items)) board.items_page = { items: board.items };
   if (!board.items_page || !board.items_page.items) board.items_page = { items: [] };
+  const getPhotoUrl = (u) => {
+    if (!u) return null;
+    const raw = u.photo_thumb_small || u.photo_original || u.photo_small || u.photo_original_url
+      || u.avatar || u.avatar_small || u.url || null;
+    if (typeof raw === 'string') return raw;
+    if (raw && typeof raw === 'object' && raw.url) return raw.url;
+    if (raw && typeof raw === 'object') return raw.thumb_small || raw.thumbSmall || raw.original || null;
+    return null;
+  };
+  const addUser = (u, usersById) => {
+    if (!u || u.id == null) return;
+    const id = String(u.id);
+    const userObj = {
+      id,
+      name: u.name || '',
+      email: u.email || '',
+      photoUrl: getPhotoUrl(u)
+    };
+    usersById[id] = userObj;
+    if (!/^person_/i.test(id)) usersById[`person_${id}`] = userObj;
+  };
   try {
+    const subscribers = board.subscribers || [];
+    subscribers.forEach((s) => addUser(s, board.__usersById));
     const items = board.items_page.items || [];
     const userIds = Array.from(new Set(
       items
         .flatMap((item) => (item.column_values || []))
-        .filter((cv) => (cv.type && cv.type.toLowerCase() === 'person') || (cv.id && String(cv.id).toLowerCase() === 'person'))
+        .filter((cv) => isPersonColumn(cv))
         .flatMap((cv) => {
           if (!cv.value) return [];
           try {
             const parsed = JSON.parse(cv.value);
             const arr = parsed?.personsAndTeams || parsed?.persons || [];
             return arr
-              .filter((x) => x && typeof x.id === 'number')
-              .map((x) => x.id);
+              .filter((x) => x && x.id != null)
+              .map((x) => {
+                const raw = x.id;
+                if (typeof raw === 'number') return raw;
+                const s = String(raw).replace(/^person_/i, '');
+                const n = parseInt(s, 10);
+                return Number.isNaN(n) ? null : n;
+              })
+              .filter((n) => n != null);
           } catch (e) {
             return [];
           }
@@ -364,19 +598,53 @@ async function fetchBoardItems(boardId) {
     ));
     if (userIds.length) {
       const usersData = await makeRequest(GET_USERS_QUERY, { ids: userIds });
-      const users = usersData?.users || [];
-      const usersById = {};
-      users.forEach((u) => {
-        if (!u || u.id == null) return;
-        usersById[String(u.id)] = {
-          id: String(u.id),
-          name: u.name || '',
-          email: u.email || '',
-          photoUrl: u.photo_thumb_small || u.photo_original || null
-        };
-      });
-      board.__usersById = usersById;
-      board.__assigneeOptions = Object.values(usersById).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      (usersData?.users || []).forEach((u) => addUser(u, board.__usersById));
+    }
+    // ყველა account მომხმარებელი – Person dropdown-ში ყველა ემაილი
+    const allAccountUsers = Array.isArray(accountUsers) ? accountUsers : [];
+    allAccountUsers.forEach((u) => addUser(u, board.__usersById));
+    if (allAccountUsers.length === 0) {
+      try {
+        const res = await makeRequest(GET_ALL_USERS_QUERY, {});
+        (res?.users || []).forEach((u) => addUser(u, board.__usersById));
+      } catch (e) {
+        console.warn('[Monday API] users ვერ მოიძებნა:', e?.message);
+      }
+    }
+    // Workspace მომხმარებლები (სხვა წყაროებიდან რაც არ მოვიდა)
+    const workspaceId = board.workspace_id ?? board.workspace?.id;
+    if (workspaceId) {
+      try {
+        const wsRes = await makeRequest(GET_WORKSPACE_USERS_QUERY, {
+          workspaceIds: [typeof workspaceId === 'number' ? workspaceId : parseInt(workspaceId, 10)]
+        });
+        const workspaces = wsRes?.workspaces || [];
+        workspaces.forEach((ws) => {
+          (ws.users_subscribers || []).forEach((u) => addUser(u, board.__usersById));
+        });
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    // Person სვეტის settings_str-იდან suggested/allowed user IDs
+    const suggestedIds = extractSuggestedPersonIdsFromColumns(board.columns);
+    if (suggestedIds.length) {
+      const suggestedData = await makeRequest(GET_USERS_QUERY, { ids: suggestedIds });
+      (suggestedData?.users || []).forEach((u) => addUser(u, board.__usersById));
+    }
+    board.__assigneeOptions = Object.values(board.__usersById).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    // მომხმარებლები ფოტოების გარეშე – ვემატებთ GET_USERS_QUERY-ით (ყველას ფოტოს მისაღებად)
+    const missingPhotoIds = Object.entries(board.__usersById)
+      .filter(([, u]) => !u.photoUrl)
+      .map(([id]) => parseInt(id, 10))
+      .filter((n) => !Number.isNaN(n));
+    if (missingPhotoIds.length) {
+      try {
+        const photoRes = await makeRequest(GET_USERS_QUERY, { ids: missingPhotoIds });
+        (photoRes?.users || []).forEach((u) => addUser(u, board.__usersById));
+      } catch (e) {
+        /* ignore */
+      }
     }
   } catch (e) {
     console.warn('[Monday API] მომხმარებლების ამოღება ვერ მოხერხდა (avatar-ები გამოტოვდება):', e?.message);
@@ -452,11 +720,22 @@ function getStatusFromItem(item) {
   return (col && col.text && col.text.trim()) ? col.text.trim() : 'Uncategorized';
 }
 
+/** Monday.com Person/People სვეტის გამოვლენა – type ან id შეიძლება იყოს person/people/assignee/owner და სხვა. */
+function isPersonColumn(cv) {
+  const t = (cv?.type || '').toLowerCase();
+  const id = String(cv?.id || '').toLowerCase();
+  if (t === 'person' || t === 'people') return true;
+  const personIds = ['person', 'people', 'assignee', 'owner', 'responsible', 'contact', 'creator', 'account_manager'];
+  return personIds.some((pid) => id === pid || id.includes(pid));
+}
+
 /** item-იდან Person სვეტის მნიშვნელობა (პერსონის სახელი + ავატარი, თუ გვაქვს usersById) */
-function getPersonFromItem(item, usersById = {}) {
-  const col = (item.column_values || []).find(
-    (cv) => (cv.type && cv.type.toLowerCase() === 'person') || (cv.id && String(cv.id).toLowerCase() === 'person')
-  );
+function getPersonFromItem(item, usersById = {}, personColumnId = null) {
+  const cvList = item.column_values || [];
+  let col = personColumnId
+    ? cvList.find((cv) => String(cv?.id || '') === String(personColumnId))
+    : null;
+  if (!col) col = cvList.find(isPersonColumn);
   const fallbackName = (col && col.text && col.text.trim()) ? col.text.trim() : null;
 
   let personId = null;
@@ -464,8 +743,8 @@ function getPersonFromItem(item, usersById = {}) {
     try {
       const parsed = JSON.parse(col.value);
       const arr = parsed?.personsAndTeams || parsed?.persons || [];
-      const first = Array.isArray(arr) ? arr.find((x) => x && typeof x.id === 'number') : null;
-      if (first && typeof first.id === 'number') {
+      const first = Array.isArray(arr) ? arr.find((x) => x && (x.id != null)) : null;
+      if (first && first.id != null) {
         personId = String(first.id);
       }
     } catch (e) {
@@ -473,12 +752,17 @@ function getPersonFromItem(item, usersById = {}) {
     }
   }
 
-  const user = personId ? usersById[personId] : null;
+  let user = personId ? usersById[personId] : null;
+  if (!user && personId) {
+    const numId = personId.replace(/^person_/i, '');
+    user = usersById[numId] || (numId !== personId ? usersById[personId] : null);
+  }
   if (!user && !fallbackName) return null;
 
   return {
     id: user?.id || personId || null,
     name: user?.name || fallbackName,
+    email: user?.email || null,
     avatarUrl: user?.photoUrl || null
   };
 }
@@ -513,10 +797,9 @@ function buildItemExtraFields(item, columnsById = {}) {
       return { id, type, title, value };
     })
     .filter((field) => {
-      if (!field.value) return false;
-      if (field.type === 'status' || field.type === 'person' || field.type === 'date') return false;
+      if (field.type === 'status' || field.type === 'person' || field.type === 'people' || field.type === 'date') return false;
       const lowId = field.id.toLowerCase();
-      if (lowId === 'status' || lowId === 'person' || lowId === 'date') return false;
+      if (lowId === 'status' || lowId === 'person' || lowId === 'people' || lowId === 'date') return false;
       return true;
     });
 }
@@ -537,7 +820,8 @@ function getDateColumnId(item) {
 }
 
 function getPersonColumnId(item) {
-  return getColumnValueByType(item, 'person')?.id || null;
+  const col = (item.column_values || []).find(isPersonColumn);
+  return col?.id || null;
 }
 
 const MONDAY_COLOR_TO_HEX = {
@@ -632,7 +916,7 @@ function transformToKanban(boardData) {
       id: item.id,
       boardId: boardData.id ? String(boardData.id) : null,
       title: item.name,
-      assignee: getPersonFromItem(item, usersById),
+      assignee: getPersonFromItem(item, usersById, boardData.__personColumnId),
       boardName,
       groupId: item.group?.id ? String(item.group.id) : null,
       groupTitle: item.group?.title || '',
@@ -705,7 +989,7 @@ function transformToKanbanByStatus(boardData) {
       id: item.id,
       boardId: boardData.id ? String(boardData.id) : null,
       title: item.name,
-      assignee: getPersonFromItem(item, usersById),
+      assignee: getPersonFromItem(item, usersById, boardData.__personColumnId),
       boardName,
       groupId: item.group?.id ? String(item.group.id) : null,
       groupTitle: item.group?.title || '',
@@ -769,6 +1053,36 @@ function getDemoKanbanData() {
   return transformToKanban(MOCK_BOARD_DATA['demo-board-1']);
 }
 
+/** Monday Suggested people – ყველა account მომხმარებელი Person dropdown-ისთვის */
+async function fetchAccountUsers() {
+  const getPhotoUrl = (u) => {
+    if (!u) return null;
+    const raw = u.photo_thumb_small || u.photo_original || u.photo_small || u.avatar || null;
+    if (typeof raw === 'string') return raw;
+    if (raw && typeof raw === 'object' && raw.url) return raw.url;
+    return null;
+  };
+  const users = [];
+  const addUser = (u) => {
+    if (!u || u.id == null) return;
+    const id = String(u.id);
+    if (users.some((x) => String(x.id) === id)) return;
+    users.push({
+      id,
+      name: u.name || '',
+      email: u.email || '',
+      photoUrl: getPhotoUrl(u)
+    });
+  };
+  try {
+    const res = await makeRequest(GET_ALL_USERS_QUERY, {});
+    (res?.users || []).forEach(addUser);
+  } catch (e) {
+    console.warn('[Monday API] fetchAccountUsers:', e?.message);
+  }
+  return users.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+}
+
 const mondayService = {
   getDemoKanbanData,
   transformToKanban,
@@ -778,12 +1092,17 @@ const mondayService = {
   getMondayApi,
   hasApi,
   getCurrentBoardId,
+  getBoardIdsFromStorage,
+  setBoardIdsToStorage,
   listenContext,
   listenBoardChanges,
   waitForMondayApi,
   fetchBoards,
   fetchBoardItems,
-  updateItemDetails
+  fetchAccountUsers,
+  updateItemDetails,
+  createItem,
+  deleteItem
 };
 
 export default mondayService;
